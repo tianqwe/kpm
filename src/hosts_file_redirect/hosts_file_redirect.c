@@ -4,9 +4,11 @@
  * Copyright (C) 2024 skkk. All Rights Reserved.
  */
 
-#include <linux/module.h>
+#include <linux/err.h>
+#include <linux/fs.h>
 #include <linux/kernel.h>
-#include <linux/init.h>
+#include <linux/printk.h>
+#include <linux/string.h>
 #include <linux/kallsyms.h>
 #include <linux/ptrace.h>
 #include <linux/unistd.h>
