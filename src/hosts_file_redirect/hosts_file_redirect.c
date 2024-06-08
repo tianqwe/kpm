@@ -13,6 +13,7 @@
 #include <linux/ptrace.h>
 #include <linux/unistd.h>
 #include <asm/ptrace.h>
+#include <asm/traps.h>
 
 #include <kpm_utils.h>
 #include <kpm_hook_utils.h>
@@ -23,15 +24,17 @@ KPM_LICENSE("GPL v2");
 KPM_AUTHOR("skkk");
 KPM_DESCRIPTION("Bypass page fault detection");
 
-typedef void (*do_page_fault_t)(struct pt_regs *, unsigned long);
+typedef int (*do_page_fault_t)(struct pt_regs *, unsigned long);
+
 static do_page_fault_t original_do_page_fault;
 
-hook_func_def(do_page_fault, void, struct pt_regs *regs, unsigned long error_code);
+hook_func_def(do_page_fault, int, struct pt_regs *regs, unsigned long error_code);
 hook_func_no_info(do_page_fault);
 
-static void hook_replace(do_page_fault)(struct pt_regs *regs, unsigned long error_code) {
-    printk(KERN_INFO "Bypassing page fault detection\n");
-    // Optionally handle the fault here
+static int hook_replace(do_page_fault)(struct pt_regs *regs, unsigned long error_code) {
+    printk(KERN_INFO "Bypassing page fault detection at address: %lx\n", regs->ip);
+    // Simply return 0 to bypass the detection
+    return 0;
 }
 
 static inline bool installHook() {
