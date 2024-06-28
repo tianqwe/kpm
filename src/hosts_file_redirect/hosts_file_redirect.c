@@ -1,120 +1,75 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
-/* 
- * Copyright (C) 2023 bmax121. All Rights Reserved.
- * Copyright (C) 2024 skkk. All Rights Reserved.
- */
-
-#include <linux/err.h>
-#include <linux/fs.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/printk.h>
-#include <linux/string.h>
+#include <linux/init.h>
+#include <linux/kprobes.h>
 #include <linux/kallsyms.h>
-#include <linux/ptrace.h>
-#include <linux/unistd.h>
-#include <asm/ptrace.h>
-#include <asm/traps.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/mutex.h>
 
-#include <kpm_utils.h>
-#include <kpm_hook_utils.h>
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Your Name");
+MODULE_DESCRIPTION("Hook mincore syscall to bypass detection");
 
-KPM_NAME("page_fault_bypass");
-KPM_VERSION("1.0");
-KPM_LICENSE("GPL v2");
-KPM_AUTHOR("skkk");
-KPM_DESCRIPTION("Bypass page fault detection");
+static struct kprobe kp = {
+    .symbol_name = "sys_mincore",
+};
 
-typedef int (*do_page_fault_t)(struct pt_regs *, unsigned long);
+static DEFINE_MUTEX(mincore_mutex);
 
-static do_page_fault_t original_do_page_fault;
+static asmlinkage long (*original_mincore)(unsigned long start, size_t len,
+                                           unsigned char __user *vec);
 
-hook_func_def(do_page_fault, int, struct pt_regs *regs, unsigned long error_code);
-hook_func_no_info(do_page_fault);
+static asmlinkage long hooked_mincore(unsigned long start, size_t len,
+                                      unsigned char __user *vec)
+{
+    long ret;
+    unsigned char *fake_vec;
 
-static int hook_replace(do_page_fault)(struct pt_regs *regs, unsigned long error_code) {
-    printk(KERN_INFO "Bypassing page fault detection at address: %lx\n", regs->ip);
-    // Simply return 0 to bypass the detection
+    mutex_lock(&mincore_mutex);
+
+    fake_vec = kmalloc(len / PAGE_SIZE, GFP_KERNEL);
+    if (!fake_vec) {
+        mutex_unlock(&mincore_mutex);
+        return -ENOMEM;
+    }
+
+    memset(fake_vec, 0, len / PAGE_SIZE); // Set all pages to "not in core"
+
+    ret = copy_to_user(vec, fake_vec, len / PAGE_SIZE);
+    kfree(fake_vec);
+
+    mutex_unlock(&mincore_mutex);
+
+    if (ret != 0) {
+        return -EFAULT;
+    }
+
     return 0;
 }
 
-static inline bool installHook() {
-    bool ret = false;
+static int __init mincore_hook_init(void)
+{
+    int ret;
 
-    original_do_page_fault = (do_page_fault_t)kallsyms_lookup_name("do_page_fault");
-    if (!original_do_page_fault) {
-        printk(KERN_ERR "Could not find do_page_fault symbol\n");
-        return false;
+    ret = register_kprobe(&kp);
+    if (ret < 0) {
+        pr_err("register_kprobe failed, returned %d\n", ret);
+        return ret;
     }
 
-    hook_install(do_page_fault);
-    if (!hook_success(do_page_fault)) {
-        printk(KERN_ERR "Failed to install do_page_fault hook\n");
-        return false;
-    }
+    original_mincore = (void *)kp.addr;
+    kp.pre_handler = (kprobe_pre_handler_t)hooked_mincore;
 
-    printk(KERN_INFO "Page fault detection hook installed\n");
-    ret = true;
-
-    return ret;
-}
-
-static inline bool uninstallHook() {
-    if (hook_success(do_page_fault)) {
-        unhook((void *)hook_original(do_page_fault));
-        hook_err(do_page_fault) = HOOK_NOT_HOOK;
-        printk(KERN_INFO "Page fault detection hook removed\n");
-    } else {
-        printk(KERN_INFO "Page fault detection hook was not installed\n");
-    }
-    return true;
-}
-
-static inline void printInfo() {
-    printk(KERN_INFO "Kernel Version: %x\n", kver);
-    printk(KERN_INFO "Kernel Patch Version: %x\n", kpver);
-}
-
-static inline bool pf_control(bool enable) {
-    return enable ? installHook() : uninstallHook();
-}
-
-static long page_fault_bypass_init(const char *args, const char *event, void *__user reserved) {
-    long ret = 0;
-
-    printInfo();
-    printk(KERN_INFO "Initializing page fault bypass...\n");
-
-    if (pf_control(true)) {
-        printk(KERN_INFO "Initialization successful!\n");
-    } else {
-        ret = 1;
-        printk(KERN_INFO "Initialization failed!\n");
-    }
-
-    return ret;
-}
-
-static long page_fault_bypass_control0(const char *args, char *__user out_msg, int outlen) {
-    if (args) {
-        if (strncmp(args, "enable", 6) == 0) {
-            writeOutMsg(out_msg, &outlen, pf_control(true) ? "Page fault bypass enabled!" : "Enable failed!");
-        } else if (strncmp(args, "disable", 7) == 0) {
-            writeOutMsg(out_msg, &outlen, pf_control(false) ? "Page fault bypass disabled!" : "Disable failed!");
-        } else {
-            printk(KERN_INFO "Control error, args=%s\n", args);
-            writeOutMsg(out_msg, &outlen, "Control error!");
-            return -1;
-        }
-    }
+    pr_info("mincore syscall hooked\n");
     return 0;
 }
 
-static long page_fault_bypass_exit(void *__user reserved) {
-    uninstallHook();
-    printk(KERN_INFO "Exiting page fault bypass...\n");
-    return 0;
+static void __exit mincore_hook_exit(void)
+{
+    unregister_kprobe(&kp);
+    pr_info("mincore syscall unhooked\n");
 }
 
-KPM_INIT(page_fault_bypass_init);
-KPM_CTL0(page_fault_bypass_control0);
-KPM_EXIT(page_fault_bypass_exit);
+module_init(mincore_hook_init);
+module_exit(mincore_hook_exit);
